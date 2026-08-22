@@ -202,6 +202,13 @@ class GitHubClient:
     def list_reviews(self, pull_number: int) -> list[dict[str, Any]]:
         return self._request("GET", f"/repos/{self.repository}/pulls/{pull_number}/reviews")
 
+    def find_open_pulls_for_branch(self, head_branch: str) -> list[dict[str, Any]]:
+        encoded = urllib.parse.quote(f"{self.owner}:{head_branch}", safe="")
+        return self._request(
+            "GET",
+            f"/repos/{self.repository}/pulls?state=open&head={encoded}&per_page=10",
+        )
+
     def approve_pull(self, pull_number: int, body: str) -> None:
         self._request(
             "POST",
@@ -534,11 +541,57 @@ def build_comment(decision: str, reason: str, details: list[str]) -> str:
     )
 
 
-def load_check_run_event() -> dict[str, Any]:
-    raw = os.environ.get("GITHUB_EVENT_CHECK_RUN", "").strip()
-    if not raw:
-        raise RuntimeError("GITHUB_EVENT_CHECK_RUN is required")
-    return json.loads(raw)
+def load_trigger_context() -> tuple[str, str, int]:
+    """Return (head_sha, trigger_name, pull_number) from Actions event payload."""
+    event_name = os.environ.get("GITHUB_EVENT_NAME", "").strip()
+
+    if event_name == "check_run":
+        check_run = json.loads(os.environ.get("GITHUB_EVENT_CHECK_RUN", "") or "{}")
+        if (check_run.get("conclusion") or "").lower() != "success":
+            raise QuietExit("Triggering check_run was not successful; exiting.")
+
+        trigger_name = check_run.get("name") or ""
+        if trigger_name in RULES["own_check_names"] or trigger_name.startswith("Auto-Approve Evaluator"):
+            raise QuietExit("Ignoring self-triggered check_run.")
+
+        pull_requests = check_run.get("pull_requests") or []
+        if not pull_requests:
+            raise QuietExit("No associated pull request; exiting quietly.")
+
+        pull_number = int(pull_requests[0]["number"])
+        head_sha = check_run.get("head_sha") or pull_requests[0].get("head", {}).get("sha", "")
+        return head_sha, trigger_name, pull_number
+
+    if event_name == "workflow_run":
+        workflow_run = json.loads(os.environ.get("GITHUB_EVENT_WORKFLOW_RUN", "") or "{}")
+        if (workflow_run.get("conclusion") or "").lower() != "success":
+            raise QuietExit("Triggering workflow_run was not successful; exiting.")
+        if workflow_run.get("event") != "pull_request":
+            raise QuietExit("workflow_run was not from a pull_request; exiting.")
+
+        trigger_name = workflow_run.get("name") or ""
+        if trigger_name in ("Auto-Approve Evaluator",):
+            raise QuietExit("Ignoring self-triggered workflow_run.")
+
+        head_sha = workflow_run.get("head_sha") or ""
+        head_branch = workflow_run.get("head_branch") or ""
+        if not head_sha or not head_branch:
+            raise QuietExit("workflow_run missing head metadata; exiting.")
+
+        token = os.environ.get("GITHUB_TOKEN", "").strip()
+        repository = os.environ.get("GITHUB_REPOSITORY", "").strip()
+        gh = GitHubClient(token, repository)
+        pulls = gh.find_open_pulls_for_branch(head_branch)
+        if not pulls:
+            raise QuietExit("No open pull request for workflow_run branch; exiting.")
+        pull_number = int(pulls[0]["number"])
+        return head_sha, trigger_name, pull_number
+
+    raise RuntimeError(f"Unsupported GITHUB_EVENT_NAME: {event_name or '(empty)'}")
+
+
+class QuietExit(Exception):
+    """Expected early exit without failure."""
 
 
 def main() -> int:
@@ -551,23 +604,11 @@ def main() -> int:
         print("GITHUB_REPOSITORY not set; exiting.")
         return 1
 
-    check_run = load_check_run_event()
-    if (check_run.get("conclusion") or "").lower() != "success":
-        print("Triggering check_run was not successful; exiting.")
+    try:
+        head_sha, trigger_name, pull_number = load_trigger_context()
+    except QuietExit as exc:
+        print(str(exc))
         return 0
-
-    trigger_name = check_run.get("name") or ""
-    if trigger_name in RULES["own_check_names"] or trigger_name.startswith("Auto-Approve Evaluator"):
-        print("Ignoring self-triggered check_run.")
-        return 0
-
-    pull_requests = check_run.get("pull_requests") or []
-    if not pull_requests:
-        print("No associated pull request; exiting quietly.")
-        return 0
-
-    pull_number = pull_requests[0]["number"]
-    head_sha = check_run.get("head_sha") or pull_requests[0].get("head", {}).get("sha", "")
 
     gh = GitHubClient(token, repository)
     bot = gh.get_authenticated_user()
@@ -577,6 +618,8 @@ def main() -> int:
     if pull.get("state") != "open":
         print("PR is not open; exiting.")
         return 0
+
+    print(f"Evaluating PR #{pull_number} at {head_sha} (trigger: {trigger_name})")
 
     files = gh.get_pull_files(pull_number)
 
@@ -640,6 +683,9 @@ def main() -> int:
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
-    except Exception as exc:  # noqa: BLE001 — surface failure in Actions logs
+    except QuietExit as exc:
+        print(str(exc))
+        raise SystemExit(0) from exc
+    except Exception as exc:
         print(f"Evaluator failed: {exc}", file=sys.stderr)
         raise
