@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 # Common English rent patterns: $1200, 1200/mo, Rs 25,000, ₹25000, 1.2k, etc.
+# Auto-approve smoke test: comment-only change (no logic edits).
 RENT_PATTERNS = [
     re.compile(
         r"(?:rs\.?|inr|₹)\s*([0-9]{1,3}(?:,[0-9]{2,3})+|[0-9]+(?:\.\d+)?)\s*(k|l|lac|lakh)?",
