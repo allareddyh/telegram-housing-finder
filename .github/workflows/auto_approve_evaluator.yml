@@ -1,0 +1,40 @@
+name: Auto-Approve Evaluator
+
+on:
+  check_run:
+    types: [completed]
+
+permissions:
+  pull-requests: write
+  contents: read
+  checks: read
+  statuses: read
+
+concurrency:
+  group: auto-approve-${{ github.event.check_run.head_sha }}
+  cancel-in-progress: true
+
+jobs:
+  evaluate:
+    name: evaluate
+    runs-on: ubuntu-latest
+    if: >-
+      github.event.check_run.conclusion == 'success' &&
+      github.event.check_run.name != 'evaluate' &&
+      !startsWith(github.event.check_run.name, 'Auto-Approve Evaluator')
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run auto-approve evaluator
+        env:
+          GITHUB_TOKEN: ${{ secrets.AUTO_APPROVE_TOKEN || secrets.MKT_GH_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_EVENT_CHECK_RUN: ${{ toJson(github.event.check_run) }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+        run: python .github/workflows/auto_approve_evaluator.py

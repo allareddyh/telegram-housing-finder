@@ -1,0 +1,39 @@
+name: Python Review
+
+on:
+  pull_request:
+    paths:
+      - "**/*.py"
+
+permissions:
+  contents: read
+
+jobs:
+  python-review:
+    name: python-review
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Static import smoke test
+        run: python -c "import filters; import telegram_client"
+
+      - name: Evaluator helpers smoke test
+        run: |
+          python - <<'PY'
+          import runpy
+          m = runpy.run_path(".github/workflows/auto_approve_evaluator.py")
+          a = "def foo():\n    return 1\n"
+          b = "def foo():\n    # comment\n    return 1\n"
+          c = "def foo():\n    return 2\n"
+          assert m["is_comment_or_format_only_python"](a, b)
+          assert not m["is_comment_or_format_only_python"](a, c)
+          print("evaluator smoke ok")
+          PY
